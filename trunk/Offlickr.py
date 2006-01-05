@@ -14,7 +14,7 @@ import os.path
 # http://beej.us/flickr/flickrapi/
 from flickrapi import FlickrAPI
 
-__version__ = '0.3 - 2006-01-03'
+__version__ = '0.3 - 2006-01-03 + DEV'
 maxTime = '9999999999'
 
 # Gotten from Flickr
@@ -36,7 +36,7 @@ class Offlickr:
         self.flickrUserId = uid
 
     def __testFailure(self, rsp):
-        """Returns whether the previous call was successful"""
+        """Returns whether the previous API call was successful"""
         if rsp['stat'] == "fail":
             print "Error!"
             return True
@@ -97,7 +97,7 @@ class Offlickr:
         return  [ metadata, rsp.photo[0]['originalformat'] ]
 
     def getPhotoSizes(self, pid):
-        """Returns a string with is a list of available sizes for a photo"""
+        """Returns an XMLNode which is a list of available sizes for a photo"""
         rsp = self.fapi.photos_getSizes(api_key=self.__flickrAPIKey, auth_token=self.token,
                                         photo_id=pid)
         if self.__testFailure(rsp):
@@ -116,18 +116,23 @@ class Offlickr:
         return source
 
     def __downloadReportHook(self, count, blockSize, totalSize):
-        if self.__verbose == False:
+        """Invokes hook with the percentage of download completed."""
+        if not self.__downloadHook:
             return
         p = 100 * count * blockSize / totalSize
-        if (p > 100):
-            p = 100
-        print "\r %3d %%" % p,
-        sys.stdout.flush()
+        self.__downloadHook(min(p,100))
 
-    def downloadURL(self, url, filename, verbose = False):
-        """Saves a photo in a file"""
-        self.__verbose = verbose
-        urllib.urlretrieve(url, filename, reporthook=self.__downloadReportHook)
+    def downloadURL(self, url, filename, hook = None):
+        """Saves a photo in a file.
+        If a hook function is specified, it will be regularly called
+        during the download with an integer parameter indicating the
+        percentage of the download accomplished."""
+        self.__downloadHook = hook
+        if hook:
+            reporthook = self.__downloadReportHook
+        else:
+            reporthook = None
+        urllib.urlretrieve(url, filename, reporthook)
 
 def usage():
     """Command line interface usage"""
@@ -152,6 +157,10 @@ def fileWrite(filename, string):
     f.write(string)
     f.close()
     print "Written as", filename
+
+def downloadHook(p):
+    print "\r %3d %%" % p,
+    sys.stdout.flush()
 
 def backupPhotos(offlickr, target, dateLo, dateHi, getPhotos):
     """Back photos up for a particular time range"""
@@ -187,7 +196,7 @@ def backupPhotos(offlickr, target, dateLo, dateHi, getPhotos):
         if source == None:
             print "Oopsie, no photo found"
         print 'Retrieving ' + source + ' as ' + f
-        offlickr.downloadURL(source, target + '/' + f, verbose = True);
+        offlickr.downloadURL(source, target + '/' + f, downloadHook)
         print "\r... done!"
 
 def backupPhotosets(offlickr, target):
