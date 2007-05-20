@@ -2,6 +2,8 @@
 # Hugo Haas -- mailto:hugo@larve.net -- http://larve.net/people/hugo/
 # Homepage: http://larve.net/people/hugo/2005/12/offlickr/
 # License: GPLv2
+#
+# wget patch by Daniel Drucker <dmd@3e.org>
 
 import sys
 import libxml2
@@ -9,12 +11,13 @@ import urllib
 import getopt
 import time
 import os.path
+import threading
 
 # Beej's Python Flickr API
 # http://beej.us/flickr/flickrapi/
 from flickrapi import FlickrAPI
 
-__version__ = '0.3 - 2006-01-03 + DEV'
+__version__ = '0.6 - 2007-05-20'
 maxTime = '9999999999'
 
 # Gotten from Flickr
@@ -23,20 +26,23 @@ flickrSecret = 'fd221d0336de3b6d'
 
 class Offlickr:
 
-    def __init__(self, key, secret, uid, browser = "lynx"):
+    def __init__(self, key, secret, uid, httplib = None, browser = "lynx",
+		 verbose = False):
         """Instantiates an Offlickr object
         An API key is needed, as well as an API secret and a user id.
         A browser can be specified to be used for authorizing the program
         to access the user account."""
         self.__flickrAPIKey = key
         self.__flickrSecret = secret
+	self.__httplib = httplib
         # Get authentication token
         self.fapi = FlickrAPI(self.__flickrAPIKey, self.__flickrSecret)
         self.token = self.fapi.getToken(browser=browser)
         self.flickrUserId = uid
+	self.verbose = verbose
 
     def __testFailure(self, rsp):
-        """Returns whether the previous API call was successful"""
+        """Returns whether the previous call was successful"""
         if rsp['stat'] == "fail":
             print "Error!"
             return True
@@ -46,13 +52,17 @@ class Offlickr:
     def getPhotoList(self, dateLo, dateHi):
         """Returns a list of photo given a time frame"""
         n = 0
+	flickr_max = 500
         photos = [ ]
 
+	print "Retrieving list of photos"
         while True:
+	    if self.verbose:
+		print "Requesting a page..."
             n = n + 1
             rsp = self.fapi.photos_search(api_key=self.__flickrAPIKey, auth_token=self.token,
                                           user_id = self.flickrUserId,
-                                          per_page = "500", # Max allowed by Flickr
+                                          per_page = str(flickr_max), # Max allowed by Flickr
                                           page = str(n),
                                           min_upload_date = dateLo, max_upload_date = dateHi)
             if self.__testFailure(rsp):
@@ -60,6 +70,8 @@ class Offlickr:
             if rsp.photos[0]['total'] == '0':
                 return None
             photos += rsp.photos[0].photo
+	    if self.verbose:
+		print " %d photos so far" % len(photos)
             if len(photos) >= int(rsp.photos[0]['total']):
                 break
 
@@ -86,18 +98,34 @@ class Offlickr:
         return info
 
     def getPhotoMetadata(self, pid):
-        """Returns a string containing the photo metadata (in XML)"""
+        """Returns an array containing containing the photo metadata (as a string), and the format of the photo"""
+	if self.verbose:
+	    print "Requesting metadata for photo %s" % pid
         rsp = self.fapi.photos_getInfo(api_key=self.__flickrAPIKey, auth_token=self.token,
                                        photo_id=pid)
         if self.__testFailure(rsp):
             return None
         doc = libxml2.parseDoc(rsp.xml)
-        metadata = str(doc.xpathEval( "/rsp/photo")[0])
+        metadata = doc.xpathEval("/rsp/photo")[0].serialize()
         doc.freeDoc()
         return  [ metadata, rsp.photo[0]['originalformat'] ]
 
+    def getPhotoComments(self, pid):
+        """Returns an XML string containing the photo comments"""
+	if self.verbose:
+	    print "Requesting comments for photo %s" % pid
+        rsp = self.fapi.photos_comments_getList(api_key=self.__flickrAPIKey,
+						auth_token=self.token,
+						photo_id=pid)
+        if self.__testFailure(rsp):
+            return None
+        doc = libxml2.parseDoc(rsp.xml)
+        comments = doc.xpathEval( "/rsp/comments")[0].serialize()
+        doc.freeDoc()
+        return comments
+
     def getPhotoSizes(self, pid):
-        """Returns an XMLNode which is a list of available sizes for a photo"""
+        """Returns a string with is a list of available sizes for a photo"""
         rsp = self.fapi.photos_getSizes(api_key=self.__flickrAPIKey, auth_token=self.token,
                                         photo_id=pid)
         if self.__testFailure(rsp):
@@ -116,23 +144,25 @@ class Offlickr:
         return source
 
     def __downloadReportHook(self, count, blockSize, totalSize):
-        """Invokes hook with the percentage of download completed."""
-        if not self.__downloadHook:
+        if self.__verbose == False:
             return
         p = 100 * count * blockSize / totalSize
-        self.__downloadHook(min(p,100))
+        if (p > 100):
+            p = 100
+        print "\r %3d %%" % p,
+        sys.stdout.flush()
 
-    def downloadURL(self, url, filename, hook = None):
-        """Saves a photo in a file.
-        If a hook function is specified, it will be regularly called
-        during the download with an integer parameter indicating the
-        percentage of the download accomplished."""
-        self.__downloadHook = hook
-        if hook:
-            reporthook = self.__downloadReportHook
-        else:
-            reporthook = None
-        urllib.urlretrieve(url, filename, reporthook)
+    def downloadURL(self, url, target, filename, verbose = False):
+        """Saves a photo in a file"""
+        self.__verbose = verbose
+	tmpfile = "%s/%s.TMP" % (target, filename)
+	if self.__httplib == 'wget':
+	    cmd = 'wget -q -t 0 -T 120 -w 10 -c -O %s %s' % (tmpfile, url)
+	    os.system(cmd)
+	else:
+	    urllib.urlretrieve(url, tmpfile,
+			       reporthook=self.__downloadReportHook)
+	os.rename(tmpfile, "%s/%s" % (target, filename))
 
 def usage():
     """Command line interface usage"""
@@ -145,8 +175,13 @@ def usage():
     print "\t\t\t(default: until now)"
     print "\t-d <dir>\tdirectory for saving files (default: ./dst)"
     print "\t-p\t\tback up photos in addition to photo metadata"
+    print "\t-n\t\tdo not redownload anything which has already been downloaded (only jpg checked)"
+    print "\t-o\t\toverwrite photo, even if it already exists"
     print "\t-s\t\tback up all photosets (time range is ignored)"
+    print "\t-w\t\tuse wget instead of internal Python HTTP library"
+    print "\t-c <threads>\tnumber of threads to run to backup photos (default: 1)"
     print "\t-b <browser>\tbrowser to use for authentication (default: opera)"
+    print "\t-v\t\tverbose output"
     print "\t-h\t\tthis help message"
     print "\nDates are specified in seconds since the Epoch (00:00:00 UTC, January 1, 1970)."
     print "\nVersion " + __version__
@@ -158,11 +193,60 @@ def fileWrite(filename, string):
     f.close()
     print "Written as", filename
 
-def downloadHook(p):
-    print "\r %3d %%" % p,
-    sys.stdout.flush()
+class photoBackupThread(threading.Thread):
+   def __init__ (self, sem, i, total, id, title, offlickr, target, getPhotos,
+		 doNotRedownload, overwritePhotos):
+       self.sem = sem
+       self.i = i
+       self.total = total
+       self.id = id
+       self.title = title
+       self.offlickr = offlickr
+       self.target = target
+       self.getPhotos = getPhotos
+       self.doNotRedownload = doNotRedownload
+       self.overwritePhotos = overwritePhotos
+       threading.Thread.__init__(self)
 
-def backupPhotos(offlickr, target, dateLo, dateHi, getPhotos):
+   def run(self):
+       backupPhoto(self.i, self.total, self.id, self.title, self.target, self.offlickr, self.doNotRedownload, self.getPhotos, self.overwritePhotos)
+       self.sem.release()
+
+def backupPhoto(i, total, id, title, target, offlickr, doNotRedownload, getPhotos, overwritePhotos):
+    print str(i) + "/" + str(total) + ": " + id + ": " + title.encode("utf-8")
+    if doNotRedownload and os.path.isfile(target + '/' + id + '.xml') and os.path.isfile(target + '/' + id + '-comments.xml') and ((not getPhotos) or (getPhotos and os.path.isfile(target + '/' + id + '.jpg'))):
+	print "Photo %s already downloaded; continuing" % id
+	return
+    # Get Metadata
+    metadataResults = offlickr.getPhotoMetadata(id)
+    if metadataResults == None:
+	print "Failed!"
+	sys.exit(2)
+    metadata = metadataResults[0]
+    format = metadataResults[1]
+    # Write metadata
+    fileWrite(target + '/' + id + '.xml', metadata)
+    # Get comments
+    photoComments = offlickr.getPhotoComments(id)
+    fileWrite(target + '/' + id + '-comments.xml',
+	      photoComments)
+    # Do we want the picture too?
+    if getPhotos == False:
+	return
+    filename = id + '.' + format
+    source = offlickr.getOriginalPhoto(id)
+    if source == None:
+	print "Oopsie, no photo found"
+	return
+    if os.path.isfile("%s/%s" % (target, filename)) and not overwritePhotos:
+	print "%s already downloaded... continuing" % filename
+	return
+    print 'Retrieving ' + source + ' as ' + filename
+    offlickr.downloadURL(source, target, filename, verbose = True);
+    print "Done downloading %s" % filename
+
+def backupPhotos(threads, offlickr, target, dateLo, dateHi, getPhotos,
+		 doNotRedownload, overwritePhotos):
     """Back photos up for a particular time range"""
     if dateHi == maxTime:
         t = time.time()
@@ -177,27 +261,21 @@ def backupPhotos(offlickr, target, dateLo, dateHi, getPhotos):
     total = len(photos)
     print "Backing up" , total , "photos"
 
+    if threads > 1:
+	concurrentThreads = threading.Semaphore(threads)
     i = 0
     for p in photos:
         i = i + 1
         pid = str(int(p['id'])) # Making sure we don't have weird things here
-        print str(i) + "/" + str(total) + ": " + pid + ": " + p['title']
-        # Get Metadata
-        metadata = offlickr.getPhotoMetadata(pid)
-        if metadata == None:
-            print "Failed!"
-            continue
-        fileWrite(target + '/' + pid + '.xml', metadata[0])
-        # Do we want the picture too?
-        if getPhotos == False:
-            continue
-        f = pid + '.' + metadata[1]
-        source = offlickr.getOriginalPhoto(pid)
-        if source == None:
-            print "Oopsie, no photo found"
-        print 'Retrieving ' + source + ' as ' + f
-        offlickr.downloadURL(source, target + '/' + f, downloadHook)
-        print "\r... done!"
+	if threads > 1:
+	    concurrentThreads.acquire()
+	    downloader = photoBackupThread(concurrentThreads, i, total, pid,
+					   p['title'], offlickr,
+					   target, getPhotos, doNotRedownload,
+					   overwritePhotos)
+	    downloader.start()
+	else:
+	    backupPhoto(i, total, pid, p['title'], target, offlickr, doNotRedownload, getPhotos, overwritePhotos)
 
 def backupPhotosets(offlickr, target):
     """Back photosets up"""
@@ -234,13 +312,18 @@ def main():
     dateLo = '1'
     dateHi = maxTime
     getPhotos = False
+    overwritePhotos = False
+    doNotRedownload = False
     target = 'dst'
     browser = 'opera'
     photosets = False
+    verbose = False
+    threads = 1
+    httplib = None
 
     # Parse command line
     try:
-        opts, args = getopt.getopt(sys.argv[1:], "hpsb:f:t:d:i:", ["help"])
+        opts, args = getopt.getopt(sys.argv[1:], "hvponswb:f:t:d:i:c:", ["help"])
     except getopt.GetoptError:
         usage()
         sys.exit(2)
@@ -252,6 +335,10 @@ def main():
             flickrUserId = a
         if o == '-p':
             getPhotos = True
+        if o == '-o':
+            overwritePhotos = True
+        if o == '-n':
+            doNotRedownload = True
         if o == '-f':
             dateLo = a
         if o == '-t':
@@ -260,8 +347,12 @@ def main():
             target = a
         if o == '-b':
             browser = a
-        if o == '-s':
-            photosets = True
+	if o == '-w':
+	    httplib = 'wget'
+        if o == '-c':
+            threads = int(a)
+        if o == '-v':
+            verbose = True
 
     # Check that we have a user id specified
     if flickrUserId == None:
@@ -273,10 +364,12 @@ def main():
         print target + " is not a directory; please fix that."
         sys.exit(1)
 
-    offlickr = Offlickr(flickrAPIKey, flickrSecret, flickrUserId, browser)
+    offlickr = Offlickr(flickrAPIKey, flickrSecret, flickrUserId,
+			httplib, browser, verbose)
 
     if photosets == False:
-        backupPhotos(offlickr, target, dateLo, dateHi, getPhotos)
+        backupPhotos(threads, offlickr, target, dateLo, dateHi, getPhotos,
+		     doNotRedownload, overwritePhotos)
     else:
         backupPhotosets(offlickr, target)
 

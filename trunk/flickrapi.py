@@ -16,6 +16,10 @@
 # Release 5: converted into fuller-featured "flickrapi"
 # Release 6: fix upload sig bug (thanks Deepak Jois), encode test output
 # Release 7: fix path construction, Manish Rai Jain's improvements, exceptions
+# Release 8: change API endpoint to "api.flickr.com"
+# Release 9: change to MIT license
+# Release 10: fix horrid \r\n bug on final boundary
+# Release 11: break out validateFrob() for subclassing
 #
 # Work by (or inspired by) Manish Rai Jain <manishrjain@gmail.com>:
 #
@@ -23,23 +27,31 @@
 #    use of urllib2 to allow uploads through a proxy, upload accepts
 #    raw data as well as a filename
 #
-# Copyright 2005 Brian "Beej Jorgensen" Hall <beej@beej.us>
+# Copyright (c) 2007 Brian "Beej Jorgensen" Hall
 #
-#    This work is licensed under the Creative Commons
-#    Attribution License.  To view a copy of this license,
-#    visit http://creativecommons.org/licenses/by/2.5/ or send
-#    a letter to Creative Commons, 543 Howard Street, 5th
-#    Floor, San Francisco, California, 94105, USA.
+# Permission is hereby granted, free of charge, to any person obtaining
+# a copy of this software and associated documentation files (the
+# "Software"), to deal in the Software without restriction, including
+# without limitation the rights to use, copy, modify, merge, publish,
+# distribute, sublicense, and/or sell copies of the Software, and to
+# permit persons to whom the Software is furnished to do so, subject to
+# the following conditions:
 #
-# This license says that I must be credited for any derivative works.
-# You do not need to credit me to simply use the FlickrAPI classes in
-# your Python scripts--you only need to credit me if you're taking this
-# FlickrAPI class and modifying it or redistributing it.
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Software.
 #
-# Previous versions of this API were granted to the public domain.
-# You're free to use those as you please.
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+# IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+# CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+# TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+# SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
-# Beej Jorgensen, Maintainer, November 2005
+# Certain previous versions of this API were granted to the public
+# domain.  You're free to use those as you please.
+#
+# Beej Jorgensen, Maintainer, 19-Jan-2007
 # beej@beej.us
 #
 
@@ -103,7 +115,7 @@ class XMLNode:
 		return self.attrib[key]
 
 	#-----------------------------------------------------------------------
-	#@classmethod
+	@classmethod
 	def parseXML(cls, xmlStr, storeXML=False):
 		"""Convert an XML string into a nice instance tree of XMLNodes.
 
@@ -166,7 +178,7 @@ class FlickrAPI:
 	  rsp = flickr.auth_checkToken(api_key=flickrAPIKey, auth_token=token)
 
 	"""
-	flickrHost = "flickr.com"
+	flickrHost = "api.flickr.com"
 	flickrRESTForm = "/services/rest/"
 	flickrAuthForm = "/services/auth/"
 	flickrUploadForm = "/services/upload/"
@@ -235,8 +247,7 @@ class FlickrAPI:
 				#print "--response----------------------------------------"
 				#print data
 				f.close()
-				x = XMLNode()
-				return x.parseXML(data, True)
+				return XMLNode.parseXML(data, True)
 
 			self.__handlerCache[method] = handler;
 
@@ -336,7 +347,7 @@ class FlickrAPI:
 			data = jpegData
 
 		postData = body.encode("utf_8") + data + \
-			("--%s--" % (boundary)).encode("utf_8")
+			("\r\n--%s--" % (boundary)).encode("utf_8")
 
 		request = urllib2.Request(url)
 		request.add_data(postData)
@@ -345,12 +356,11 @@ class FlickrAPI:
 		response = urllib2.urlopen(request)
 		rspXML = response.read()
 
-		x = XMLNode()
-		return x.parseXML(rspXML)
+		return XMLNode.parseXML(rspXML)
 
 
 	#-----------------------------------------------------------------------
-	#@classmethod
+	@classmethod
 	def testFailure(cls, rsp, exit=True):
 		"""Exit app if the rsp XMLNode indicates failure."""
 		if rsp['stat'] == "fail":
@@ -358,14 +368,14 @@ class FlickrAPI:
 			if exit: sys.exit(1)
 
 	#-----------------------------------------------------------------------
-	#@classmethod
+	@classmethod
 	def getPrintableError(cls, rsp):
 		"""Return a printed error message string."""
 		return "%s: error %s: %s" % (rsp.elementName, \
 			cls.getRspErrorCode(rsp), cls.getRspErrorMsg(rsp))
 
 	#-----------------------------------------------------------------------
-	#@classmethod
+	@classmethod
 	def getRspErrorCode(cls, rsp):
 		"""Return the error code of a response, or 0 if no error."""
 		if rsp['stat'] == "fail":
@@ -374,7 +384,7 @@ class FlickrAPI:
 		return 0
 
 	#-----------------------------------------------------------------------
-	#@classmethod
+	@classmethod
 	def getRspErrorMsg(cls, rsp):
 		"""Return the error message of a response, or "Success" if no error."""
 		if rsp['stat'] == "fail":
@@ -407,8 +417,7 @@ class FlickrAPI:
 			data = f.read()
 			f.close()
 
-			x = XMLNode()
-			rsp = x.parseXML(data)
+			rsp = XMLNode.parseXML(data)
 
 			return rsp.auth[0].token[0].elementText
 
@@ -432,6 +441,10 @@ class FlickrAPI:
 		f.write(xml)
 		f.close()
 
+
+	#-----------------------------------------------------------------------
+	def validateFrob(self, frob, perms, browser):
+		os.system("%s '%s'" % (browser, self.__getAuthURL(perms, frob)))
 
 	#-----------------------------------------------------------------------
 	def getToken(self, perms="read", browser="lynx"):
@@ -476,7 +489,7 @@ class FlickrAPI:
 			frob = rsp.frob[0].elementText
 
 			# validate online
-			os.system("%s '%s'" % (browser, self.__getAuthURL(perms, frob)))
+			self.validateFrob(frob, perms, browser)
 
 			# get a token
 			rsp = self.auth_getToken(api_key=self.apiKey, frob=frob)
